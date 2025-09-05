@@ -95,96 +95,153 @@ export default function KanaCrosswordApp(): React.ReactElement {
   }
 
   // ==== Crossword builder ====
-  function buildCrossword(items: Item[]): { grid: Map<string, Cell>; placements: Placement[] } {
-    const grid = new Map<string, Cell>();
-    const placements: Placement[] = [];
+// ==== Crossword builder ====
+function buildCrossword(items: Item[]): { grid: Map<string, Cell>; placements: Placement[] } {
+  const grid = new Map<string, Cell>();
+  const placements: Placement[] = [];
 
-    function canPlace(chars: string[], dir: Dir, sx: number, sy: number): boolean {
-      for (let i = 0; i < chars.length; i++) {
-        const x = dir === 'across' ? sx + i : sx;
-        const y = dir === 'across' ? sy : sy + i;
-        const cell = grid.get(keyOf(x, y));
-        if (cell && cell.ch !== chars[i]) return false; // 文字が衝突
-      }
-      return true;
-    }
+  // --- ガチャ度（確率）調整用 ---
+  const RANDOM_PICK_PROB = 0.28; // 28%の確率で「ベスト以外」を選ぶ
+  const TOP_K_FOR_RANDOM = 4;    // ランダム時は上位K候補から選ぶ（品質を落とし過ぎないため）
 
-    function placeWord(entry: Item, dir: Dir, sx: number, sy: number): void {
-      const chars = splitChars(entry.hira);
-      for (let i = 0; i < chars.length; i++) {
-        const x = dir === 'across' ? sx + i : sx;
-        const y = dir === 'across' ? sy : sy + i;
-        const k = keyOf(x, y);
-        const existing = grid.get(k);
-        const cell: Cell = existing ?? { ch: chars[i], words: [] };
-        if (!existing) grid.set(k, cell);
-        cell.words.push({ id: entry.id, idx: i, dir });
-      }
-      placements.push({ id: entry.id, kanji: entry.kanji, dir, startX: sx, startY: sy, len: entry.hira.length });
-    }
+  // --- 接触禁止を厳しめにした配置可否判定（現状の仕様を維持）---
+  function canPlace(chars: string[], dir: Dir, sx: number, sy: number): boolean {
+    const has = (x:number,y:number)=> grid.has(keyOf(x,y));
 
-    if (!items.length) return { grid, placements };
+    // 単語の直前・直後は必ず空白
+    const beforeX = dir==='across' ? sx-1 : sx;
+    const beforeY = dir==='across' ? sy   : sy-1;
+    const afterX  = dir==='across' ? sx+chars.length : sx;
+    const afterY  = dir==='across' ? sy               : sy+chars.length;
+    if (has(beforeX, beforeY) || has(afterX, afterY)) return false;
 
-    // 1語目は原点に横置き
-    placeWord(items[0], 'across', 0, 0);
+    for (let i=0; i<chars.length; i++){
+      const x = dir==='across' ? sx+i : sx;
+      const y = dir==='across' ? sy   : sy+i;
+      const k = keyOf(x,y);
+      const cell = grid.get(k);
 
-    for (let wi = 1; wi < items.length; wi++) {
-      const entry = items[wi];
-      const chars = splitChars(entry.hira);
-      let best: null | { dir: Dir; sx: number; sy: number; overlaps: number; score: number } = null;
-
-      // 既存グリッドの文字位置インデックス
-      const posByChar = new Map<string, Array<{ key: string; cell: Cell }>>();
-      grid.forEach((cell, key) => {
-        if (!posByChar.has(cell.ch)) posByChar.set(cell.ch, []);
-        posByChar.get(cell.ch)!.push({ key, cell });
-      });
-
-      // 共有文字で交差候補を探索
-      for (let i = 0; i < chars.length; i++) {
-        const ch = chars[i];
-        const hits = posByChar.get(ch) || [];
-        for (const h of hits) {
-          const [x, y] = fromKey(h.key);
-          const existingDir = h.cell.words[0]?.dir || 'across';
-          const tryDirs: Dir[] = existingDir === 'across' ? ['down', 'across'] : ['across', 'down'];
-          for (const dir of tryDirs) {
-            const sx = dir === 'across' ? x - i : x;
-            const sy = dir === 'across' ? y : y - i;
-            if (!canPlace(chars, dir, sx, sy)) continue;
-            let overlaps = 0;
-            for (let j = 0; j < chars.length; j++) {
-              const cx = dir === 'across' ? sx + j : sx;
-              const cy = dir === 'across' ? sy : sy + j;
-              const c = grid.get(keyOf(cx, cy));
-              if (c && c.ch === chars[j]) overlaps++;
-            }
-            const score = overlaps * 1000 - Math.abs(sx) - Math.abs(sy);
-            if (!best || score > best.score) best = { dir, sx, sy, overlaps, score };
-          }
-        }
+      // 既存マスあり → 同じ文字で、かつ同方向に既出でない（=交差のみOK）
+      if (cell){
+        if (cell.ch !== chars[i]) return false;
+        if (cell.words.some(w=>w.dir===dir)) return false; // 平行重なり禁止
+        continue; // 交差はOK
       }
 
-      if (best) {
-        placeWord(entry, best.dir, best.sx, best.sy);
-      } else {
-        // 交差不可なら独立配置（段をずらす）
-        let maxY = 0;
-        grid.forEach((_, key) => {
-          const [, y] = fromKey(key);
-          if (y > maxY) maxY = y;
-        });
-        const sy = maxY + 2 + wi; // ずらしながら下に配置
-        if (canPlace(chars, 'across', 0, sy)) placeWord(entry, 'across', 0, sy);
-        else if (canPlace(chars, 'down', 0, sy)) placeWord(entry, 'down', 0, sy);
-        else {
-          placeWord(entry, 'across', wi * 3, sy);
-        }
+      // 新規マスの周辺接触禁止（交差以外の接触を不可）
+      if (dir==='across'){
+        if (has(x, y-1) || has(x, y+1)) return false;
+      } else { // down
+        if (has(x-1, y) || has(x+1, y)) return false;
       }
     }
-
-    return { grid, placements };
+    return true;
   }
+
+  function placeWord(entry: Item, dir: Dir, sx: number, sy: number): void {
+    const chars = splitChars(entry.hira);
+    for (let i = 0; i < chars.length; i++) {
+      const x = dir === 'across' ? sx + i : sx;
+      const y = dir === 'across' ? sy : sy + i;
+      const k = keyOf(x, y);
+      const existing = grid.get(k);
+      const cell: Cell = existing ?? { ch: chars[i], words: [] };
+      if (!existing) grid.set(k, cell);
+      cell.words.push({ id: entry.id, idx: i, dir });
+    }
+    placements.push({ id: entry.id, kanji: entry.kanji, dir, startX: sx, startY: sy, len: entry.hira.length });
+  }
+
+  // --- ここから “ガチャ” 仕様 ---
+  if (!items.length) return { grid, placements };
+
+  // ① 単語リストをシャッフル（毎回違う並びにする）
+  const wordList = [...items];
+  for (let i = wordList.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [wordList[i], wordList[j]] = [wordList[j], wordList[i]];
+  }
+
+  // 1語目は原点に横置き
+  placeWord(wordList[0], 'across', 0, 0);
+
+  // ② 各語の配置：候補を集めて、たまにランダムで選ぶ
+  for (let wi = 1; wi < wordList.length; wi++) {
+    const entry = wordList[wi];
+    const chars = splitChars(entry.hira);
+
+    // 既存グリッドの文字位置インデックス
+    const posByChar = new Map<string, Array<{ key: string; cell: Cell }>>();
+    grid.forEach((cell, key) => {
+      if (!posByChar.has(cell.ch)) posByChar.set(cell.ch, []);
+      posByChar.get(cell.ch)!.push({ key, cell });
+    });
+
+    // 候補を全部集める（scoreで良し悪しを評価）
+    const candidates: Array<{dir:Dir; sx:number; sy:number; overlaps:number; score:number}> = [];
+    let best: null | {dir:Dir; sx:number; sy:number; overlaps:number; score:number} = null;
+
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
+      const hits = posByChar.get(ch) || [];
+      for (const h of hits) {
+        const [x, y] = fromKey(h.key);
+        const existingDir = h.cell.words[0]?.dir || 'across';
+        const tryDirs: Dir[] = existingDir === 'across' ? ['down', 'across'] : ['across', 'down'];
+        for (const dir of tryDirs) {
+          const sx = dir === 'across' ? x - i : x;
+          const sy = dir === 'across' ? y : y - i;
+          if (!canPlace(chars, dir, sx, sy)) continue;
+
+          // 重なり数（交差数）と原点からの近さでスコア
+          let overlaps = 0;
+          for (let j = 0; j < chars.length; j++) {
+            const cx = dir === 'across' ? sx + j : sx;
+            const cy = dir === 'across' ? sy : sy + j;
+            const c = grid.get(keyOf(cx, cy));
+            if (c && c.ch === chars[j]) overlaps++;
+          }
+          const score = overlaps * 1000 - Math.abs(sx) - Math.abs(sy);
+          const cand = { dir, sx, sy, overlaps, score };
+          candidates.push(cand);
+          if (!best || score > best.score) best = cand;
+        }
+      }
+    }
+
+    if (candidates.length) {
+      // 並び替えて品質順に（先頭がベスト）
+      candidates.sort((a,b)=> b.score - a.score);
+
+      // RANDOM_PICK_PROB の確率で「上位Kの中からランダム」
+      const useRandom = Math.random() < RANDOM_PICK_PROB;
+      const pool = useRandom ? candidates.slice(0, Math.min(TOP_K_FOR_RANDOM, candidates.length))
+                             : [candidates[0]];
+      const pick = pool[Math.floor(Math.random() * pool.length)];
+      placeWord(entry, pick.dir, pick.sx, pick.sy);
+      continue;
+    }
+
+    // 交差候補が無いとき：少しだけ詰めつつ独立配置（1行の空白は確保）
+    let maxY = -Infinity;
+    grid.forEach((_, key) => { const [, y] = fromKey(key); if (y > maxY) maxY = y; });
+    const sy = (isFinite(maxY) ? maxY : -1) + 2; // 1行空ける
+
+    if (canPlace(chars, 'across', 0, sy)) {
+      placeWord(entry, 'across', 0, sy);
+    } else if (canPlace(chars, 'down', 0, sy)) {
+      placeWord(entry, 'down', 0, sy);
+    } else {
+      let placed = false;
+      for (let sx = -4; sx <= 20 && !placed; sx++) {
+        if (canPlace(chars, 'across', sx, sy)) { placeWord(entry, 'across', sx, sy); placed = true; }
+      }
+      if (!placed) placeWord(entry, 'across', 0, sy + 1);
+    }
+  }
+
+  return { grid, placements };
+}
 
   function computeBounds(grid: Map<string, Cell>): Bounds {
     if (grid.size === 0) return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
