@@ -409,12 +409,19 @@ function buildCrossword(items: Item[]): { grid: Map<string, Cell>; placements: P
   const height = Math.max(1, bounds.maxY - bounds.minY + 1);
   const cellSize = 36;
 
-  const startNumByCell = new Map<string, number>();
-  placements.forEach((p) => {
-    const k = keyOf(p.startX, p.startY);
-    const num = clueNums[p.id];
-    if (num) startNumByCell.set(k, num);
-  });
+// そのセルの左上(=よこ) / 右上(=たて)の両方を持てるようにする
+type StartNums = { across?: number; down?: number };
+const startNumsByCell = new Map<string, StartNums>();
+
+placements.forEach((p) => {
+  const k = keyOf(p.startX, p.startY);
+  const num = clueNums[p.id];
+  if (!num) return;
+  const entry = startNumsByCell.get(k) ?? {};
+  if (p.dir === 'across') entry.across = num; // よこ → 左上
+  else entry.down = num;                      // たて → 右上
+  startNumsByCell.set(k, entry);
+});
 
   function GridView({ showLetters, allowSelect }: { showLetters: boolean; allowSelect: boolean }): React.ReactElement {
     return (
@@ -447,11 +454,25 @@ function buildCrossword(items: Item[]): { grid: Map<string, Cell>; placements: P
                       background: has ? '#fff' : '#e5e7eb'
                     }}
                   >
-                    {startNumByCell.has(k) && (
-                      <div className='absolute top-0.5 left-1 text-[10px] text-gray-500'>
-                        {labelFromNumber(startNumByCell.get(k)!)}
+              {(() => {
+                const sn = startNumsByCell.get(k);
+                return (
+                  <>
+                    {/* よこ（Across）の開始番号 → 左上に表示 */}
+                    {sn?.across && (
+                      <div className="absolute top-0.5 left-1 text-[10px] text-gray-500">
+                        {labelFromNumber(sn.across)}
                       </div>
                     )}
+                    {/* たて（Down）の開始番号 → 右上に表示 */}
+                    {sn?.down && (
+                      <div className="absolute top-0.5 right-1 text-[10px] text-gray-500">
+                        {labelFromNumber(sn.down)}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
                     {has && (
                       <div
                         className={`text-lg ${isSpecial ? 'font-extrabold' : 'font-medium'} ${
